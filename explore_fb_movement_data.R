@@ -15,6 +15,11 @@ library(wellknown)
 library(leaflet)
 library(geosphere)
 library(leaflet.minicharts)
+library(ggplot2)
+library(plotly)
+library(sf)
+library(grid)
+library(gridExtra)
 
 # get wd (in the AMUG Dropbox)
 user <- Sys.info()[['user']]
@@ -76,11 +81,10 @@ setnames(d, c('Baseline: People Moving','Length(km)'),
 # give IDs to the A and B tiles (the ones provided in this dataset dont appear to be unique)
 coords <- unique(data.table(lat = c(d$latA,d$latB), lon = c(d$lonA,d$lonB)))
 coords[, id := 1:.N]
-d <- merge(d, coords, by.x = c('lonA','latA'), by.y = c('lon','lat'), all.x = TRUE)
-setnames(d,'id','idA')
 d <- merge(d, coords, by.x = c('lonB','latB'), by.y = c('lon','lat'), all.x = TRUE)
 setnames(d,'id','idB')
-
+d <- merge(d, coords, by.x = c('lonA','latA'), by.y = c('lon','lat'), all.x = TRUE)
+d[, idA := id]
 
 ### Lets try to visualize the data a bit
 # mostly the same tos and fros around the puget sound region
@@ -88,16 +92,17 @@ plot(d$lonA,d$latA)
 points(d$lonB,d$latB,col='red')
 
 # add a basemap of seattle
-m <- leaflet(data = d[time == '0800']) %>% # just morning commuters
+dd=d[time == '0000']
+m <- leaflet(data = dd) %>% # just morning commuters
   setView(lng = -122.5, lat = 47.6, zoom = 9) %>%
   addTiles() %>%
-  addMarkers(~lonA, ~latA) 
+  addMarkers(~lonA, ~latA, popup=dd$idA) 
 m
 
 
 #  intensity of inflow or outflow
 
-dd <- d[time=='1600',] #subset  
+dd <- d[time=='1600',] #subset  (I think 0800 is the middle of the night)
 #  try to visualize flows
 flows <- gcIntermediate(dd[,c('lonA','latA')], dd[,c('lonB','latB')], sp = TRUE, addStartEnd = TRUE)
 flows$time    <- dd$time
@@ -134,4 +139,37 @@ m
 
 
 # in reality, these are centroids of pixels. Can try to visualize them as such, showing
+
+
+# make a heatmap matrix of comings and goings. 
+shp <- st_read('./seattleshp/City_Clerk_Neighborhoods.shp')
+dd <- highlight_key(d, ~id)
+g1 <-
+ggplot(data = dd, aes(x=idA, y=idB, size=movers, color=time, group=id)) + 
+  geom_point(alpha=.5) + xlab('Coming') + ylab('Going') + theme_bw()
+g2 <-
+  ggplot(dd) + #geom_sf(data=shp) + 
+  geom_point(aes(lonA,latA,group=id)) + theme_bw() 
+
+
+s <- subplot(g1,g2,nrows=2,shareY=FALSE,shareX=FALSE)
+highlight(s, on = "plotly_selected", selectize = TRUE)
+
+
+
+
+
+
+
+
+# get basemap
+# register_google(key='AIzaSyCcGMG6iDYb7K1ITyW2J6KgWHitbZ-Y2tU')
+# base <- ggmap(
+#   get_stamenmap(c(left   = min(coords$lon),
+#                 right  = max(coords$lon),
+#                 bottom = min(coords$lat),
+#                 top    = max(coords$lat)), 
+#               zoom = 9, maptype = "toner-lite"))
+# g2= base + geom_point(data=coords, aes(lon,lat,color=id))
+
 
