@@ -26,7 +26,7 @@ vacc1 <- raster(sprintf('%s/rasters/vaccine/dpt1_coverage/mean/IHME_AFRICA_DPT_2
 vacc3 <- raster(sprintf('%s/rasters/vaccine/dpt3_coverage/mean/IHME_AFRICA_DPT_2000_2016_DPT3_COVERAGE_PREV_MEAN_2014_Y2019M04D01.TIF',datpath))
 pop <- raster(sprintf('%s/rasters/population/under5/worldpop_raked_a0004t_1y_2014_00_00.tif',datpath))
 edu <- raster(sprintf('%s/rasters/education/years_f_15_49/mean/IHME_AFRICA_EDU_2000_2015_YEARS_FEMALE_15_49_MEAN_2014_Y2018M02D28.TIF',datpath))
-
+sani  <- brick(sprintf('%s/rasters/sanitation/s_imp_mean_ras_cod_0.tif',datpath))[[15]]
 
 ## ###########################################################
 ## Clean
@@ -53,6 +53,7 @@ vacc1 <- mask(crop(vacc1,shp), shp)
 vacc3 <- mask(crop(vacc3,shp), shp)
 pop   <- mask(crop(pop  ,shp), shp)
 edu   <- mask(crop(edu  ,shp), shp)
+sani  <- mask(crop(sani  ,shp), shp)
 
 
 ## ###########################################################
@@ -92,7 +93,7 @@ ggplot(agg) + geom_sf(data = shp, fill = 'white', colour = 'grey') + theme_minim
   scale_color_gradientn(values = c(0,0.8,1.0), colours = c("#a6172d","#EFDC05","#4f953b") ) +
   ylab('') + xlab('')
 
-
+ggplot(agg[agg$child=='Child = TRUE']) + geom_density_ridges(aes(pct_seropositive,factor(variable)),alpha=.75) + xlim(0,1) + theme_bw()
 
 
  # is there a correlation within clusters between kids and adults? within HHs?
@@ -117,31 +118,47 @@ agg$spatial_dpt1  <- raster::extract(vacc, SpatialPoints(cbind(agg$lon,agg$lat))
 d$spatial_dpt1   <- raster::extract(vacc1, SpatialPoints(cbind(d$lon,d$lat)))
 d$spatial_dpt3   <- raster::extract(vacc3, SpatialPoints(cbind(d$lon,d$lat)))
 d$spatial_edu    <- raster::extract(edu, SpatialPoints(cbind(d$lon,d$lat)))
+d$spatial_sani   <- raster::extract(sani, SpatialPoints(cbind(d$lon,d$lat)))
 d$spatial_logpop <- log(raster::extract(pop, SpatialPoints(cbind(d$lon,d$lat))))
 d[, spatial_dpt_dropout := spatial_dpt1-spatial_dpt3] 
 
 # predict prevalence of seropositivity
-univ_mod_plot <- function(var, types = 1:3){
+univ_mod_plot <- function(var, types = 1:3, data = d, outcome = 'svp'){
+  
+  if(var == 'spatial_logpop') d <- d[spatial_logpop>2,]
   
   varstr  <- var
   out <- data.table()
   
   for(t in types){
-    tmp <- data.table(var = d[[varstr]], svp = d[[paste0('sabin.',t)]]>3)
-  
-    m    <- gam(svp~ s(var), family = 'binomial', data = tmp)
+    tmp <- data.table(var = data[[varstr]])
+    if(outcome == 'svp') {
+      tmp$outcome <- data[[paste0('sabin.',t)]]>3
+      ilink <- function(x) plogis(x)
+      fam <- 'binomial'
+      lab <- 'Predicted Seropositive Prevalence'
+    } else if (outcome == 'log2titer') {
+      tmp$outcome <- data[[paste0('sabin.',t)]]
+      fam <- 'gaussian'
+      ilink <- function(x) x
+      lab <- 'Mean Predicted Log2 Titer'
+    } else {
+      stop('Poorly defined outcome')
+    }
+    m    <- gam(outcome~ s(var), family = fam, data = tmp)
+    if(t==2) print(summary(m))
     pred <- predict.gam(m,newdata=tmp,se.fit=TRUE)
-    tmp[, m := plogis(pred[[1]])]
-    tmp[, l := plogis(pred[[1]]-pred[[2]]*1.96)]
-    tmp[, u := plogis(pred[[1]]+pred[[2]]*1.96)]
+    tmp[, m := ilink(pred[[1]])]
+    tmp[, l := ilink(pred[[1]]-pred[[2]]*1.96)]
+    tmp[, u := ilink(pred[[1]]+pred[[2]]*1.96)]
     tmp[, type := t]
     out <- rbind(out,tmp)
   }  
 
-  colz <- c('#30A9DE', '#E53A40', '#EFDC05'); leg <- 'Type'
+    colz <- c('#30A9DE', '#E53A40', '#EFDC05'); leg <- 'Type'
   g1 <- ggplot(out,aes(x=var)) + geom_ribbon(aes(ymin=l,ymax=u,fill=factor(type)), alpha = 0.5) +
-    geom_line(aes(y=m,color=factor(type))) + theme_minimal() + ylab('Predicted Seropositive Prevalence') +
-    ylim(min(out$l),1) + xlab('') + scale_color_manual(values=colz, name=leg) + scale_fill_manual(values=colz, name=leg) +
+    geom_line(aes(y=m,color=factor(type))) + theme_minimal() + ylab(lab) + # ylim(min(out$l),ymax) + 
+    xlab('') + scale_color_manual(values=colz, name=leg) + scale_fill_manual(values=colz, name=leg) +
     theme(legend.position = c(0.85, 0.1), legend.direction = "horizontal")
   g2 <- ggplot(out) + geom_density(aes(var),colour=NA,fill='grey') + theme_minimal() + xlab(varstr) + ylab("Data Density")
   grid.arrange(g1,g2, heights=c(2,1))
@@ -149,21 +166,51 @@ univ_mod_plot <- function(var, types = 1:3){
 }  
 
 
-univ_mod_plot(var='spatial_dpt1')
+univ_mod_plot(var='spatial_dpt1',type=2)
+univ_mod_plot(var='spatial_dpt1',type=2,outcome='log2titer')
+
 univ_mod_plot(var='spatial_dpt3')
-univ_mod_plot(var='spatial_dpt_dropout')
-univ_mod_plot(var='spatial_edu')
-univ_mod_plot(var='spatial_logpop')
+univ_mod_plot(var='spatial_dpt_dropout',type=2)
+univ_mod_plot(var='spatial_edu',type=2)
+univ_mod_plot(var='spatial_edu',type=2,outcome='log2titer') # todo, prediciton not confidence interval
+
+univ_mod_plot(var='spatial_logpop',type=2)
+univ_mod_plot(var='spatial_logpop',type=2,outcome='log2titer')
+
+univ_mod_plot(var='spatial_sani')
+univ_mod_plot(var='spatial_sani',type=1:3,outcome='log2titer')
 
 univ_mod_plot(var='age_y')
+univ_mod_plot(var='age_y',type=1:3,outcome='log2titer')
 
-univ_mod_plot(var='tOPV')
+univ_mod_plot(var='tOPV',type=1:3)
+univ_mod_plot(var='tOPV',type=1:3,outcome='log2titer')
 
-univ_mod_plot(var='age_mother')
+univ_mod_plot(var='age_mother',type=2)
+univ_mod_plot(var='age_mother',type=1:3,outcome='log2titer')
 
+univ_mod_plot(var='hhSize',type=2,outcome='log2titer')
+univ_mod_plot(var='birth_order',type=1:3,outcome='svp')
+univ_mod_plot(var='birth_order',type=1:3,outcome='log2titer')
 
 
 
 # predict mean log2 titer and get prediction intervals
-m2 <- gam(sabin.2 ~ s(dpt1), data = d)
+
+
+# predict mean log2 titer and get prediction intervals
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
