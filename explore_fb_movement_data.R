@@ -143,13 +143,14 @@ m
 
 # make a heatmap matrix of comings and goings. 
 shp <- st_read('./seattleshp/City_Clerk_Neighborhoods.shp')
-dd <- highlight_key(d, ~id)
+
+dd <- highlight_key(d[time='0800'], ~id)
 g1 <-
 ggplot(data = dd, aes(x=idA, y=idB, size=movers, color=time, group=id)) + 
-  geom_point(alpha=.5) + xlab('Coming') + ylab('Going') + theme_bw()
+  geom_point(alpha=.5) + xlab('From') + ylab('To') + theme_bw()
 g2 <-
   ggplot(dd) + #geom_sf(data=shp) + 
-  geom_point(aes(lonA,latA,group=id)) + theme_bw() 
+  geom_point(aes(lonA,latA,group=`Starting Region Name`,color=id)) + theme_bw() 
 
 
 s <- subplot(g1,g2,nrows=2,shareY=FALSE,shareX=FALSE)

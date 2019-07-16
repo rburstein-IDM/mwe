@@ -11,7 +11,7 @@
 
 
 # load libraries
-libs <- c('rgdal', 'raster', 'data.table', 'sf', 'sp')
+libs <- c('rgdal', 'raster', 'data.table', 'sf', 'sp','fasterize')
 for(l in libs) library(l, character.only = TRUE)
 
 
@@ -19,6 +19,7 @@ for(l in libs) library(l, character.only = TRUE)
 user     <- Sys.info()['login']
 root     <- sprintf('C:/Users/%s/Dropbox (IDM)/AMUG/roy/scratch/district_agg', user) # assuming you are linked to AMUG dropbox
 datpath  <- sprintf('%s/data/',root) 
+datpath <- 'C:/Users/rburstein/Dropbox (IDM)/AMUG/vxdel_equity/pathways/data/rasters/'
 outpath  <- sprintf('%s/output/',root) 
 shp_path <- "Q:/Data/Polis/polis_geodatabases/downloaded_20190211/WHO_POLIO_GLOBAL_GEODATABASE.gdb"
 
