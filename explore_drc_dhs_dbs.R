@@ -8,7 +8,7 @@
 
 
 # libs
-libs <- c('data.table','ggplot2','ggridges','lubridate','raster','sf','mgcv','gridExtra')
+libs <- c('data.table','ggplot2','ggridges','lubridate','raster','sf','mgcv','gridExtra','gstat','polycor')
 for(l in libs) library(l,character.only=TRUE)
 
 # locations - relative to user, but in AMUG Dropbox
@@ -84,16 +84,16 @@ agg <- dd[lat!=0,.(sabin.1 = mean(sabin.1>3,na.rm=TRUE),
                    sabin.3 = mean(sabin.3>3,na.rm=TRUE),
                    N       = sum(!is.na(sabin.1))),
           by = .(province,lat,lon,cluster,urban,urbanDetail,child)]
-agg <- melt(agg, id.vars = c('province','lat','lon','cluster','urban','urbanDetail','N','child'))
-setnames(agg, 'value', 'pct_seropositive')
+lagg <- melt(agg, id.vars = c('province','lat','lon','cluster','urban','urbanDetail','N','child'))
+setnames(lagg, 'value', 'pct_seropositive')
 
-ggplot(agg) + geom_sf(data = shp, fill = 'white', colour = 'grey') + theme_minimal() + coord_sf(datum = NA) + 
+ggplot(lagg) + geom_sf(data = shp, fill = 'white', colour = 'grey') + theme_minimal() + coord_sf(datum = NA) + 
   geom_point(aes(lon,lat,size=N,color=pct_seropositive),alpha=0.75, stroke = 0, shape = 16) + 
   facet_grid(child ~ variable) +
   scale_color_gradientn(values = c(0,0.8,1.0), colours = c("#a6172d","#EFDC05","#4f953b") ) +
   ylab('') + xlab('')
 
-ggplot(agg[agg$child=='Child = TRUE']) + geom_density_ridges(aes(pct_seropositive,factor(variable)),alpha=.75) + xlim(0,1) + theme_bw()
+ggplot(lagg[child=='Child = TRUE']) + geom_density_ridges(aes(pct_seropositive,factor(variable)),alpha=.75) + xlim(0,1) + theme_bw()
 
 
  # is there a correlation within clusters between kids and adults? within HHs?
@@ -102,19 +102,35 @@ ggplot(agg[agg$child=='Child = TRUE']) + geom_density_ridges(aes(pct_seropositiv
 ## ###########################################################
 ## Check out correlation across Types
 
+cor(na.omit(agg[child=='Child = TRUE',c('sabin.1','sabin.2','sabin.3'),with=FALSE]))
+cor(na.omit(d[,c('sabin.1','sabin.2','sabin.3'),with=FALSE]))
+
+
 
 
 ## ###########################################################
 ## Check out correlation across space
+# https://zia207.github.io/geospatial-data-science.github.io/semivariogram-modeling.html
+lagg$spatial_dpt1  <- raster::extract(vacc, SpatialPoints(cbind(lagg$lon,lagg$lat)))
 
+variog <- function(type){
+  chagg <- na.omit(lagg[child == 'Child = TRUE'  & variable == type])
+  coordinates(chagg) <- ~lon+lat
+  v <- variogram(pct_seropositive~1, data = chagg) # +spatial_dpt1
+  plot(v, main = paste0("Variogram - default ",type), xlab = "Separation distance (DD)")
+}
 
+variog('sabin.1')
+variog('sabin.2')
+variog('sabin.3')
+
+# even when accounting for DPT1 which is the best predictor, we get some range
 
 
 ## ###########################################################
 ## Check out correlation between potential geospatial covariates and immunity (univariate plots for now)
 
 # DPT1
-agg$spatial_dpt1  <- raster::extract(vacc, SpatialPoints(cbind(agg$lon,agg$lat)))
 d$spatial_dpt1   <- raster::extract(vacc1, SpatialPoints(cbind(d$lon,d$lat)))
 d$spatial_dpt3   <- raster::extract(vacc3, SpatialPoints(cbind(d$lon,d$lat)))
 d$spatial_edu    <- raster::extract(edu, SpatialPoints(cbind(d$lon,d$lat)))
@@ -165,9 +181,12 @@ univ_mod_plot <- function(var, types = 1:3, data = d, outcome = 'svp'){
   
 }  
 
+agg$spatial_dpt1   <- raster::extract(vacc, SpatialPoints(cbind(agg$lon,  agg$lat)))
+univ_mod_plot(var='spatial_dpt1',type=2,outcome='log2titer',data=agg) # on aggregate cluster level info
 
-univ_mod_plot(var='spatial_dpt1',type=2)
-univ_mod_plot(var='spatial_dpt1',type=2,outcome='log2titer')
+
+univ_mod_plot(var='spatial_dpt1',type=2) # on individual level data
+univ_mod_plot(var='spatial_dpt1',type=2,outcome='log2titer') # on individual but continuous outcome
 
 univ_mod_plot(var='spatial_dpt3')
 univ_mod_plot(var='spatial_dpt_dropout',type=2)
