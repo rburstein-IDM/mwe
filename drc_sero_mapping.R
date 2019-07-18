@@ -7,7 +7,7 @@
 
 # libs
 libs <- c('data.table','ggplot2','ggridges','lubridate','fasterize','gbm','dismo','rgeos',
-          'raster','sf','mgcv','gridExtra','gstat','polycor','INLA')
+          'raster','sf','mgcv','gridExtra','gstat','polycor','INLA','matrixStats')
 for(l in libs) require(l,character.only=TRUE)
 
 # locations - relative to user, but in AMUG Dropbox
@@ -16,6 +16,8 @@ for(l in libs) require(l,character.only=TRUE)
 user      <- Sys.info()[['user']]
 datpath   <- sprintf('C:/Users/%s/Dropbox (IDM)/AMUG/roy/scratch',user)
 datpath2  <- sprintf('C:/Users/%s/Dropbox (IDM)/AMUG/MikeF/DRC 2013-14 DHS Serosurvey',user)
+temptrash <- sprintf('%s/temptrash',datpath)
+
 
 # load in data
 d        <- fread(sprintf('%s/drc_dhs_polio/kids_master_dataset_v6.csv',datpath))
@@ -158,43 +160,44 @@ plot(pred) # three simple predictions
 ##   start with Sabin.2 in under-5s
 
 
-
-# make spde object
-spde <- inla.spde2.pcmatern(
-          mesh=mesh, alpha=2, ### mesh and smoothness parameter
-          prior.range=c(0.05, 0.01), ### P(practic.range<0.05)=0.01
-          prior.sigma=c(1, 0.01)) ### P(sigma>1)=0.01
-space <- inla.spde.make.index("space",
-                             n.spde = spde$n.spde)
+fevars      <- c('dpt1', 'dpt_dropout', 'mat_edu', 'imp_sani', 'log_u5pop')
+outcometype <- 'type2'
 
 # make design matrix
-narmdagg <- na.omit(dagg)
-design_matrix <- data.frame(int = 1,
-                            narmdagg)
-outcome       <- narmdagg$type2
-N             <- narmdagg$N               
+narmdagg      <- na.omit(dagg)
+outcome       <- narmdagg[[outcometype]]
+N             <- narmdagg$N      
+locs          <- cbind(narmdagg$lon, narmdagg$lat)
+narmdagg      <- narmdagg[, fevars, with=FALSE]
+design_matrix <- data.frame(int = 1, narmdagg)
 
 # make a mesh
-mesh <- inla.mesh.2d(loc      = cbind(narmdagg$lon, narmdagg$lat),
+mesh <- inla.mesh.2d(loc      = locs,
                      max.edge = c(.5,5),
                      offset   = 1,
-                     cutoff   = .5)
-plot(mesh); points(dagg$lon,dagg$lat,col='red')
+                     cutoff   = 0.5)
+plot(mesh);  points(locs, col = 'red')
+
+
+# make spde object
+spde  <- inla.spde2.matern(mesh = mesh,  alpha = 2)
+space <- inla.spde.make.index("space", n.spde = spde$n.spde)
+
 
 # make projector matrix
-A <- inla.spde.make.A(mesh, loc=cbind(narmdagg$lon, narmdagg$lat))
+A <- inla.spde.make.A(mesh, loc = locs)
 
 
 # make a data stack
-stack.obs <- inla.stack(data    = list(outcome = outcome),
+stack.obs <- inla.stack(data    = list(o = outcome),
                         A       = list(A, 1),
-                        effects = list(space,
-                                       design_matrix),
+                        effects = list(space, design_matrix),
                         tag     = 'est')
 
-# 
-formla <- outcome ~ 0 + int + dpt1 + dpt_dropout + 
-  mat_edu + imp_sani + log_u5pop + f(space, model=spde) # + f(psu,model='iid')
+
+# inla formula
+formla <- as.formula( sprintf ('o ~ -1 + %s + f(space, model = spde)', paste(fevars,collapse='+')) )
+
 
 # fit inla model
 res_fit <- inla(formla,
@@ -202,31 +205,83 @@ res_fit <- inla(formla,
                 control.predictor = list(A       = inla.stack.A(stack.obs),
                                          link    = 1,
                                          compute = FALSE),
-               # control.fixed = list(expand.factor.strategy = 'inla',
-              #                       prec.intercept = int_prior_prec,
-               #                      mean.intercept = int_prior_mn,
-              #                       mean = fe_mean_prior,
-              #                       prec = fe_sd_prior),
-              #  control.inla = list(int.strategy = intstrat, h = 1e-3, tolerance = 1e-6),
-              # weights = wgts,
-                control.compute = list(dic = TRUE,
-                                       cpo = TRUE,
-                                       config = TRUE),
-                family      = 'binomial',
-                num.threads = 1,
-                Ntrials     = N,
-                verbose     = TRUE,
-                keep        = TRUE)
+                control.compute   = list(dic     = TRUE,
+                                         cpo     = TRUE,
+                                         config  = TRUE),
+                control.fixed     = list(expand.factor.strategy = 'inla'),
+                family            = 'binomial', #'gaussian',
+                num.threads       = 1,
+                Ntrials           = N,
+                verbose           = TRUE,
+                keep              = TRUE,
+                working.directory = temptrash)
+
+summary(res_fit)
+
+#########
+##  make a prediction surface
+draws <- inla.posterior.sample(1000, res_fit)
+
+## get samples as matrices
+par_names <- rownames(draws[[1]]$latent)
+l_idx <- match(res_fit$names.fixed, par_names) # main effects
+s_idx <- grep('^space.*', par_names) # spatial effects
+pred_s <- sapply(draws, function (x) x$latent[s_idx])
+pred_l <- sapply(draws, function (x) x$latent[l_idx])
+rownames(pred_l) <- res_fit$names.fixed
+
+## if we fit with a nugget, we also need to take draws of the nugget precision
+if(length(grep('^IID.ID.*', par_names)) > 0){
+  pred_n <- sapply(draws, function(x) {
+    nug.idx <- which(grepl('IID.ID', names(draws[[1]]$hyper)))
+    x$hyperpar[[nug.idx]]}) ## this gets the precision for the nugget
+}else{
+  pred_n <- NULL
+}
+
+coords <- cbind(predfr$lon,predfr$lat)
+
+# Projector matrix
+A.pred <- inla.spde.make.A(mesh = mesh, loc = coords)
+
+predfr$int <- 1
+vals <- predfr[, c('int',fevars), with=FALSE]
+
+# get 1000 obs at each predframe location
+cell_l <- unname(as.matrix(as(data.matrix(vals), "dgeMatrix") %*% pred_l))
+cell_s <- as.matrix(crossprod(t(A.pred), pred_s))
+
+## add on nugget effect if applicable
+if(!is.null(pred_n)){
+  cell_n <- sapply(pred_n, function(x){
+    rnorm(n = nrow(cell_l), sd = 1 / sqrt(x), mean = 0)
+  })
+} else
+
+# make a cell pred object predframe by 1000 draws
+cell_pred <- plogis(cell_l + cell_s)
+  
+# make summaries for plotting
+pred_q     <- rowQuantiles(cell_pred, probs = c(0.025, 0.975))
+inlapredfr <- data.frame(mean=rowMeans(cell_pred),lower=pred_q[,1],upper=pred_q[,2])
+pred       <- insertRaster(ext_raster,inlapredfr) 
+
+# plot it
+plot(pred, zlim = c(0.5, 1.0))
+                     
 
 
-
-
-# uncertainy
-
+######################################
 # population at risk
 
+pred_popatrisk <- inlapredfr*cbind(predfr$u5pop)
 
+# about 1 million children at risk, type 2
+sum(pred_popatrisk[,1], na.rm = TRUE)
+sum(pred_popatrisk[,2], na.rm = TRUE)
+sum(pred_popatrisk[,3], na.rm = TRUE)
 
+plot(insertRaster(ext_raster,cbind(log(pred_popatrisk)[,1])), main='log population at risk')
 
 
 
