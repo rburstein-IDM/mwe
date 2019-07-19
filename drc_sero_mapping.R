@@ -22,6 +22,7 @@ temptrash <- sprintf('%s/temptrash',datpath)
 # load in data
 d1       <- fread(sprintf('%s/drc_dhs_polio/kids_master_dataset_v6.csv',datpath))
 d2       <- fread(sprintf('%s/kids_and_adults.csv',datpath2))
+load(sprintf('%s/sia_draft_20190711.rdata',datpath))
 shp      <- st_read(sprintf('%s/shapefile/cod_admbnda_adm1_rgc_20170711.shp',datpath2))
 dpt1     <- raster(sprintf('%s/rasters/vaccine/dpt1_coverage/mean/IHME_AFRICA_DPT_2000_2016_DPT1_COVERAGE_PREV_MEAN_2014_Y2019M04D01.TIF',datpath))
 dpt3     <- raster(sprintf('%s/rasters/vaccine/dpt3_coverage/mean/IHME_AFRICA_DPT_2000_2016_DPT3_COVERAGE_PREV_MEAN_2014_Y2019M04D01.TIF',datpath))
@@ -104,6 +105,26 @@ predfr[, lon := coordinates(ext_raster)[,1]]
 predfr[, lat := coordinates(ext_raster)[,2]]
 
 
+## #########################################################
+## TODO: Incorporate SIAs as a spatial covariate.
+
+# bring in sia data
+sia <- data.table(df_sia_final)
+df_sia_final <- NULL
+
+# keep to the 5 years preceding this survey and DRC only
+sia <- sia[ADM0_NAME == 'DEMOCRATIC REPUBLIC OF THE CONGO']
+sia[, year := year(ymd(start_date))]
+sia <- sia[year >= 2009 & year < 2015]
+
+# keep only 0 to 5 and faction >= .5
+sia <- sia[agegroup == '0 to 5 years']
+sia <- sia[fraction >= 0.5]
+
+# collapse by ADM_2
+sia <- sia[, .(type1_sias = sum(vaccinetpye %in% c('bOPV','mOPV1','tOPV')),
+               type2_sias = sum(vaccinetpye %in% c('tOPV')),
+               type3_sias = sum(vaccinetpye %in% c('tOPV'))) ]
 
 
 ## ###########################################################
@@ -169,14 +190,11 @@ pred_ad <- insertRaster(ext_raster,cbind(plogis(predict(m1ad,newdata=predfr)),
                                          plogis(predict.gam(m2ad,newdata=predfr)),
                                          predict(m3ad,n.trees=m3ad$gbm.call$best.trees,
                                                   type='response',newdata=predfr[,incl[-1],with=FALSE])))
-plot(pred_ch) # three simple predictions
-plot(pred_ad)  
+plot(pred_ch[[3]]) # three simple predictions
+plot(pred_ad[[3]])  
 
 
 
-
-## #########################################################
-## TODO: Incorporate SIAs as a spatial covariate.
 
 
 
@@ -324,12 +342,38 @@ ad_inla_mod <- fitinlamodel(data = dagg[adult==1], fevars = vars, outcometype = 
 
 ## plot it
 hist(ch_inla_mod$inlapredfr[,1]) 
-plot(ch_inla_mod$raster, zlim = c(0, 1.0))
+plot(ch_inla_mod$raster) #, zlim = c(0.5, 1.0))
         
+hist(ad_inla_mod$inlapredfr[,1]) 
+plot(ad_inla_mod$raster) #, zlim = c(0.2, 1.0)) #, main = 'Predicted adult seropositive prevalence')
 
-# predsave             
+
+# children minus adult
+plot(ch_inla_mod$raster[[1]]-ad_inla_mod$raster[[1]], main = 'Additional immunity in children over adults')
+         
+diff_cp    <- ch_inla_mod$cell_pred - ad_inla_mod$cell_pred
+diffq      <- rowQuantiles(diff_cp, probs = c(0.025, 0.975))
+diffpredfr <- data.frame(mean=rowMeans(diff_cp),lower=diffq[,1],upper=diffq[,2])
+diff       <- insertRaster(ext_raster,diffpredfr) 
+
+plot(diff[[2:3]]) #, main = 'Predicted adult seropositive prevalence')
 
 
+## TODO aggregate these results at the district level
+
+## Do rank districts
+
+
+
+
+
+
+
+
+
+
+
+######################################
 # how do estimates compare to cluster level data?
 res <- data.table(y = dagg[[outcometype]], N = dagg$N,
               raster::extract(pred, cbind(dagg$lon,dagg$lat)))
