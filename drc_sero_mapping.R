@@ -7,7 +7,7 @@
 
 # libs
 libs <- c('data.table','ggplot2','ggridges','lubridate','fasterize','gbm','dismo','rgeos',
-          'raster','sf','mgcv','gridExtra','gstat','polycor','INLA','matrixStats')
+          'raster','sf','mgcv','gridExtra','gstat','polycor','INLA','matrixStats','RColorBrewer')
 for(l in libs) require(l,character.only=TRUE)
 
 # locations - relative to user, but in AMUG Dropbox
@@ -23,13 +23,20 @@ temptrash <- sprintf('%s/temptrash',datpath)
 d1       <- fread(sprintf('%s/drc_dhs_polio/kids_master_dataset_v6.csv',datpath))
 d2       <- fread(sprintf('%s/kids_and_adults.csv',datpath2))
 load(sprintf('%s/sia_draft_20190711.rdata',datpath))
-shp      <- st_read(sprintf('%s/shapefile/cod_admbnda_adm1_rgc_20170711.shp',datpath2))
+#shp      <- st_read(sprintf('%s/shapefile/cod_admbnda_adm1_rgc_20170711.shp',datpath2))
 dpt1     <- raster(sprintf('%s/rasters/vaccine/dpt1_coverage/mean/IHME_AFRICA_DPT_2000_2016_DPT1_COVERAGE_PREV_MEAN_2014_Y2019M04D01.TIF',datpath))
 dpt3     <- raster(sprintf('%s/rasters/vaccine/dpt3_coverage/mean/IHME_AFRICA_DPT_2000_2016_DPT3_COVERAGE_PREV_MEAN_2014_Y2019M04D01.TIF',datpath))
 u5pop    <- raster(sprintf('%s/rasters/population/under5/worldpop_raked_a0004t_1y_2014_00_00.tif',datpath))
 mat_edu  <- raster(sprintf('%s/rasters/education/years_f_15_49/mean/IHME_AFRICA_EDU_2000_2015_YEARS_FEMALE_15_49_MEAN_2014_Y2018M02D28.TIF',datpath))
 imp_sani  <- brick(sprintf('%s/rasters/sanitation/s_imp_mean_ras_cod_0.tif',datpath))[[15]]
 
+# load shapefile
+shp <- st_read(dsn = sprintf('%s/WHO_POLIO_GLOBAL_GEODATABASE.gdb',datpath), layer = 'GLOBAL_ADM2')
+shp <- subset(shp, as.Date(ENDDATE) >= Sys.Date() & ADM0_VIZ_NAME == "Democratic Republic of the Congo")
+
+# unique dataset for shp and get an info shapefile
+shp$id  <- 1:nrow(shp)
+shpinfo <- as.data.table(shp)[, c('id',paste0('ADM',0:2,'_VIZ_NAME'))]
 
 # helper functions stolen from seegMBG to use later on
 insertRaster <- function (raster, new_vals, idx = NULL) {
@@ -93,8 +100,12 @@ for(r in rlist){
   
 }
 
+# rasterize the gadm file
+rshp <- fasterize(sf = shp, raster = dpt3[[1]], field = 'id')
+
+
 # make a prediction frame representing the full raster
-predfr <- data.table(idx = 1:ncell(get(rlist[1])))
+predfr <- data.table(idx = 1:ncell(get(rlist[1])), adm2 = as.vector(rshp))
 for(r in c(rlist)){ 
   predfr[[r]] <- as.vector(get(r))
   predfr[[paste0(r,'_cs')]] <- (predfr[[r]]-csfr[var==r]$mean) / csfr[var==r]$sd
@@ -110,7 +121,6 @@ predfr[, lat := coordinates(ext_raster)[,2]]
 
 # bring in sia data
 sia <- data.table(df_sia_final)
-df_sia_final <- NULL
 
 # keep to the 5 years preceding this survey and DRC only
 sia <- sia[ADM0_NAME == 'DEMOCRATIC REPUBLIC OF THE CONGO']
@@ -122,33 +132,56 @@ sia <- sia[agegroup == '0 to 5 years']
 sia <- sia[fraction >= 0.5]
 
 # collapse by ADM_2
-sia <- sia[, .(type1_sias = sum(vaccinetpye %in% c('bOPV','mOPV1','tOPV')),
-               type2_sias = sum(vaccinetpye %in% c('tOPV')),
-               type3_sias = sum(vaccinetpye %in% c('tOPV'))) ]
+sia <- sia[, .(type1_sias = sum(vaccinetype %in% c('bOPV','mOPV1','tOPV')),
+               type2_sias = sum(vaccinetype %in% c('tOPV')),
+               type3_sias = sum(vaccinetype %in% c('tOPV'))),
+            by = .(ADM0_NAME,ADM1_NAME,ADM2_NAME)]
 
+# add adm2 id info
+shpinfo[, ADM0_NAME := toupper(ADM0_VIZ_NAME)]
+shpinfo[, ADM1_NAME := toupper(ADM1_VIZ_NAME)]
+shpinfo[, ADM2_NAME := toupper(ADM2_VIZ_NAME)]
+sia <- merge(sia, shpinfo,  by = c('ADM0_NAME', 'ADM1_NAME', 'ADM2_NAME'), 
+             all.x = TRUE)
+sia <- sia[, c('id', 'type1_sias', 'type2_sias', 'type3_sias'), with = FALSE]
+
+# make sia rasters and add them to predfr
+predfr <- merge(predfr, sia, by.x = 'adm2', by.y = 'id', all.x = TRUE)
+predfr <- predfr[order(idx)]
+
+for(r in c('type1_sias', 'type2_sias', 'type3_sias')){
+  assign(r, insertRaster(rshp, cbind(as.vector(predfr[[r]]))))
+  assign(r, insertRaster(rshp, cbind(as.vector(predfr[[r]]))))
+  assign(r, insertRaster(rshp, cbind(as.vector(predfr[[r]]))))
+  dagg[[r]] <- raster::extract(get(r), SpatialPoints(cbind(dagg$lon,dagg$lat)))
+}
 
 ## ###########################################################
 ## Super simple sanity check model
 
+summary(glm( cbind(type2,N-type2) ~ dpt1,            data = dagg[adult==0], family='binomial'))
+summary(glm( cbind(type2,N-type2) ~ type2_sias,      data = dagg[adult==0], family='binomial'))
+summary(glm( cbind(type2,N-type2) ~ dpt1+type2_sias, data = dagg[adult==0], family='binomial'))
+
 # simple logistic regression
-m1ch <- glm( cbind(type2,N-type2) ~ dpt1+dpt_dropout+mat_edu+imp_sani+log_u5pop, # + lat*lon,
+m1ch <- glm( cbind(type2,N-type2) ~ dpt1+dpt_dropout+type2_sias+mat_edu+imp_sani+log_u5pop, # + lat*lon,
               data = dagg[adult==0], family='binomial')
-m1ad <- glm( cbind(type2,N-type2) ~ dpt1+dpt_dropout+mat_edu+imp_sani+log_u5pop, # + lat*lon,
+m1ad <- glm( cbind(type2,N-type2) ~ dpt1+dpt_dropout+type2_sias+mat_edu+imp_sani+log_u5pop, # + lat*lon,
               data = dagg[adult==1], family='binomial')
 
 summary(m1ch)
 summary(m1ad)
 
 # logistic gam
-m2ch <- gam( cbind(type2,N-type2) ~ s(dpt1) + s(dpt_dropout) + s(mat_edu) + s(imp_sani) + s(log_u5pop), # + s(lat) + s(lon), 
+m2ch <- gam( cbind(type2,N-type2) ~ s(dpt1) + s(dpt_dropout) + s(type2_sias,k=3) + s(mat_edu) + s(imp_sani) + s(log_u5pop), # + s(lat) + s(lon), 
              data = dagg[adult==0], family='binomial', predict=TRUE )
-m2ad <- gam( cbind(type2,N-type2) ~ s(dpt1) + s(dpt_dropout) + s(mat_edu) + s(imp_sani) + s(log_u5pop), # + s(lat) + s(lon), 
+m2ad <- gam( cbind(type2,N-type2) ~ s(dpt1) + s(dpt_dropout) + s(type2_sias,k=3) +s(mat_edu) + s(imp_sani) + s(log_u5pop), # + s(lat) + s(lon), 
              data = dagg[adult==1], family='binomial', predict=TRUE )
 summary(m2ch) # looks like non-linear terms are more predictive.
 summary(m2ad)
 
 # how much explanatory power can we get out of a gbm?
-incl <- c('type2','dpt1','dpt_dropout','mat_edu','imp_sani','log_u5pop') #,'lat','lon')
+incl <- c('type2','dpt1','dpt_dropout','type2_sias','mat_edu','imp_sani','log_u5pop') #,'lat','lon')
 run_brt <- function(ddd)
   gbm.step(data            = ddd[,incl,with=F],
            gbm.y           = 1,
@@ -181,7 +214,7 @@ cor(na.omit(predtest_ad))
 
 
 
-# map them
+# map the the 3 predictive covariate only models
 pred_ch <- insertRaster(ext_raster,cbind(plogis(predict(m1ch,newdata=predfr)),
                                          plogis(predict.gam(m2ch,newdata=predfr)),
                                          predict(m3ch,n.trees=m3ch$gbm.call$best.trees,
@@ -190,12 +223,8 @@ pred_ad <- insertRaster(ext_raster,cbind(plogis(predict(m1ad,newdata=predfr)),
                                          plogis(predict.gam(m2ad,newdata=predfr)),
                                          predict(m3ad,n.trees=m3ad$gbm.call$best.trees,
                                                   type='response',newdata=predfr[,incl[-1],with=FALSE])))
-plot(pred_ch[[3]]) # three simple predictions
-plot(pred_ad[[3]])  
-
-
-
-
+plot(pred_ch[[1]])
+plot(pred_ad[[1]])  
 
 
 
@@ -206,7 +235,7 @@ plot(pred_ad[[3]])
 
 # make a wrapper function to do the model  heavy lifting
 
-fitinlamodel <- function(data = dagg, fevars, outcometype){
+fitinlamodel <- function(data = dagg, ndraws = 100, fevars, outcometype){
   
   # make design matrix
   message(' .. data munge')
@@ -268,7 +297,7 @@ fitinlamodel <- function(data = dagg, fevars, outcometype){
   #########
   ##  make a prediction surface
   message(' .. prediction')
-  draws <- inla.posterior.sample(1000, res_fit)
+  draws <- inla.posterior.sample(ndraws, res_fit)
   
   ## get samples as matrices
   par_names <- rownames(draws[[1]]$latent)
@@ -295,7 +324,7 @@ fitinlamodel <- function(data = dagg, fevars, outcometype){
   predfr$int <- 1
   vals <- predfr[, c('int',fevars), with=FALSE]
   
-  # get 1000 obs at each predframe location
+  # get ndraws obs at each predframe location
   cell_l <- unname(as.matrix(as(data.matrix(vals), "dgeMatrix") %*% pred_l))
   cell_s <- as.matrix(crossprod(t(A.pred), pred_s))
   
@@ -306,7 +335,7 @@ fitinlamodel <- function(data = dagg, fevars, outcometype){
   #  })
   #} else
   
-  # make a cell pred object predframe by 1000 draws
+  # make a cell pred object predframe by ndraws draws
   message(' .. summarize and save predictions')
   cell_pred <- plogis(cell_s+cell_l)
     
@@ -329,7 +358,7 @@ fitinlamodel <- function(data = dagg, fevars, outcometype){
 
 
 # fit a separate child and adult model:
-vars <- c('dpt1', 'dpt_dropout', 'mat_edu', 'imp_sani', 'log_u5pop')
+vars <- c('dpt1', 'dpt_dropout', 'type2_sias','mat_edu', 'imp_sani', 'log_u5pop')
 type <- 'type2'
 
 ch_inla_mod <- fitinlamodel(data = dagg[adult==0], fevars = vars, outcometype = type)
@@ -338,10 +367,8 @@ ad_inla_mod <- fitinlamodel(data = dagg[adult==1], fevars = vars, outcometype = 
 
 
 
-
-
 ## plot it
-hist(ch_inla_mod$inlapredfr[,1]) 
+hist(ch_inla_mod$pred_summary[,1]) 
 plot(ch_inla_mod$raster) #, zlim = c(0.5, 1.0))
         
 hist(ad_inla_mod$inlapredfr[,1]) 
@@ -359,7 +386,83 @@ diff       <- insertRaster(ext_raster,diffpredfr)
 plot(diff[[2:3]]) #, main = 'Predicted adult seropositive prevalence')
 
 
-## TODO aggregate these results at the district level
+## Aggregate these results at the district level
+ch <- data.table(ch_inla_mod$cell_pred,adm2=predfr$adm2,pop=predfr$u5pop)
+ad <- data.table(ad_inla_mod$cell_pred,adm2=predfr$adm2,pop=predfr$u5pop)
+df <- data.table(diff_cp,adm2=predfr$adm2,pop=predfr$u5pop)
+
+cols <- paste0('V',1:100)
+ch <- ch[, lapply(.SD, weighted.mean,w=pop,na.rm=TRUE), .SDcols = cols, by=adm2]
+ad <- ad[, lapply(.SD, weighted.mean,w=pop,na.rm=TRUE), .SDcols = cols, by=adm2]
+df <- df[, lapply(.SD, weighted.mean,w=pop,na.rm=TRUE), .SDcols = cols, by=adm2]
+
+
+ch <- ch[,  as.list(quantile(.SD,c(0.025,0.5,0.975),na.rm=TRUE)), by=adm2,.SDcols=cols]
+ad <- ad[,  as.list(quantile(.SD,c(0.025,0.5,0.975),na.rm=TRUE)), by=adm2,.SDcols=cols]
+df <- df[,  as.list(quantile(.SD,c(0.025,0.5,0.975),na.rm=TRUE)), by=adm2,.SDcols=cols]
+names(ch) <- c('id','ch_lower','ch_median','ch_upper')
+names(ad) <- c('id','ad_lower','ad_median','ad_upper')
+names(df) <- c('id','df_lower','df_median','df_upper')
+
+out <- merge(merge(ch, ad, by = 'id', all = TRUE), df, by = 'id', all = TRUE)
+
+
+# shapefile and plot
+shp <- merge(shp, out, by = 'id', all.x = TRUE )
+
+# plots
+g1 <- ggplot(shp) + geom_sf(aes(fill = ch_median*100)) + coord_sf(datum = NA) + 
+  theme_minimal() + theme(legend.position="bottom") +
+  scale_fill_gradientn(colours=brewer.pal(7,"YlGnBu"), 
+                       name = 'Seropositive Children (%) \nMedian Estimate') 
+g2 <- ggplot(shp) + geom_sf(aes(fill = ch_lower*100)) + coord_sf(datum = NA) + 
+  theme_minimal() + #theme(legend.position="bottom")+
+  scale_fill_gradientn(limits = c(60,100), colours=brewer.pal(7,"Greys"), name = 'Lower UI') 
+g3 <- ggplot(shp) + geom_sf(aes(fill = ch_upper*100)) + coord_sf(datum = NA) + 
+  theme_minimal() + #theme(legend.position="bottom")+
+  scale_fill_gradientn(limits = c(60,100), colours=brewer.pal(7,"Greys"), name = 'Upper UI') 
+
+g1
+grid.arrange(g2,g3,nrow=2)
+
+
+g1 <- ggplot(shp) + geom_sf(aes(fill = ad_median*100)) + coord_sf(datum = NA) + theme_minimal() +
+  scale_fill_gradientn(colours=brewer.pal(7,"YlGnBu"), 
+                       name = 'Seropositive Adults (%) \nMedian Estimate') + theme(legend.position="bottom") 
+g2 <- ggplot(shp) + geom_sf(aes(fill = ad_lower*100)) + coord_sf(datum = NA) + theme_minimal() +
+  scale_fill_gradientn(limits = c(35,82), colours=brewer.pal(7,"Greys"), name = 'Lower UI') 
+g3 <- ggplot(shp) + geom_sf(aes(fill = ad_upper*100)) + coord_sf(datum = NA) + theme_minimal() +
+  scale_fill_gradientn(limits = c(35,82), colours=brewer.pal(7,"Greys"), name = 'Upper UI') 
+
+g1
+grid.arrange(g2,g3,nrow=2)
+
+
+
+g1 <- ggplot(shp) + geom_sf(aes(fill = df_median*100)) + coord_sf(datum = NA) + theme_minimal() +
+  scale_fill_gradientn(colours=brewer.pal(7,"YlOrRd"), 
+                       name = 'Difference in Seroprevalence\nMedian Estimate')  + theme(legend.position="bottom") 
+g2 <- ggplot(shp) + geom_sf(aes(fill = df_lower*100)) + coord_sf(datum = NA) + theme_minimal() +
+  scale_fill_gradientn(limits = c(-10,60), colours=brewer.pal(7,"Greys"), name = 'Lower UI') 
+g3 <- ggplot(shp) + geom_sf(aes(fill = df_upper*100)) + coord_sf(datum = NA) + theme_minimal() +
+  scale_fill_gradientn(limits = c(-10,60), colours=brewer.pal(7,"Greys"), name = 'Upper UI') 
+
+g1
+grid.arrange(g2,g3,nrow=2)
+
+
+
+
+## Plot Covariate effects ladderplot
+tmp <- data.table(summary(ad_inla_mod$model_object)$fixed)
+tmp$var <- c('intercept',vars)
+
+ggplot(tmp, aes(x=var,ymin=`0.025quant`,ymax=`0.975quant`,y=mean)) +
+  geom_errorbar(width = .1) + theme_minimal() + 
+  geom_hline(yintercept =0,color='red') +
+  geom_point() +
+  xlab('Covariate Name') + ylab('<--- (-)   Effect size   (+) --->')
+
 
 ## Do rank districts
 
