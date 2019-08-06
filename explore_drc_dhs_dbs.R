@@ -37,7 +37,7 @@ table(d$age, round(d$age_y), useNA = 'ifany')
 
 # make one cleaned file with all ages sero data
 setnames(d2,c('age','Sabin_1','Sabin_2','Sabin_3'),c('age_y','sabin.1','sabin.2','sabin.3'))
-vnames <- c('cluster','hh','sabin.1','sabin.2','sabin.3','age_y','province','lat','lon','urban','urbanDetail')
+vnames <- c('cluster','hh','sabin.1','sabin.2','sabin.3','age_y','province','lat','lon','urban','urbanDetail','sex')
 dd <- rbind(d[,vnames,with=F],d2[adult==1,vnames,with=F])
 
 # make age band ids
@@ -77,6 +77,25 @@ ggplot(dd, aes(x=age_y,y=sabin.2,color=agegroup)) + theme_minimal() +
   ylab('Log2 Type-2 Titer') + xlab('age') +
   theme(legend.position="none")
 
+
+# again but sex seperated
+ggplot(dd, aes(x=age_y,y=sabin.2,color=sex)) + theme_minimal() + 
+  geom_point(position = position_jitter(w = 0.5, h = 0.15), alpha = .2, stroke = 0, shape = 16) + 
+  geom_hline(yintercept=3,color='black') +
+  geom_segment(data=dd[, .(mean_sabin.2 = mean(sabin.2,na.rm=TRUE)), by = .(age_min,age_max,sex)],
+               aes(x=age_min,xend=age_max,y=mean_sabin.2,yend=mean_sabin.2,color=sex),size=2) +
+  ylab('Log2 Type-2 Titer') + xlab('age') +
+  theme(legend.position = "none",
+      axis.title.y = element_text(size = 18),
+      axis.text.y  = element_text(size = 14),
+      axis.title.x = element_text(size = 18),
+      axis.text.x  = element_text(size = 14)) +
+  scale_y_continuous(breaks=c(2,3,4,6,8,10)) +
+  scale_x_continuous(breaks=c(0,5,15,20,25,30,35,40,45,50,55,60))
+
+
+
+
 # replicate maps from Mike's blogpost
 dd[, child := paste0('Child = ',age_y < 6)]
 agg <- dd[lat!=0,.(sabin.1 = mean(sabin.1>3,na.rm=TRUE),
@@ -96,7 +115,42 @@ ggplot(lagg) + geom_sf(data = shp, fill = 'white', colour = 'grey') + theme_mini
 ggplot(lagg[child=='Child = TRUE']) + geom_density_ridges(aes(pct_seropositive,factor(variable)),alpha=.75) + xlim(0,1) + theme_bw()
 
 
- # is there a correlation within clusters between kids and adults? within HHs?
+# is there a correlation within clusters between kids and adults? within HHs?
+
+
+
+## ###########################################################
+# aggregated admin 1 level maps
+p  <- st_as_sf(unique(dd[,c('lon','lat','cluster'),with=F]), coords = c('lon','lat'),crs=4326)
+admlink <- st_intersection(p,shp)[,c('cluster','ADM1_PCODE'),with=FALSE]
+st_geometry(admlink) <- NULL
+
+dd <- merge(dd, admlink, by = 'cluster', all.x =TRUE)
+
+
+ssagg <- dd[child=='Child = FALSE',.(sabin.2 = mean(sabin.2>3,na.rm=TRUE)),by = .(ADM1_PCODE)]
+ss <- merge(shp, ssagg, by = 'ADM1_PCODE', all.x=TRUE)
+
+ggplot(ss, aes(fill=sabin.2)) + geom_sf() + theme_minimal() + coord_sf(datum = NA) + 
+  scale_fill_gradientn(colours = c("#a6172d","#EFDC05","#4f953b")) + #, limits = c(0.5,1.0)) +
+  ylab('') + xlab('') + labs(fill='Proportion Seropositve')
+
+
+sssagg <- dd[child=='Child = TRUE',.(sabin.2 = mean(sabin.2>3,na.rm=TRUE), N=sum(!is.na(sabin.2))),by = .(ADM1_PCODE)]
+ss2 <- merge(shp, sssagg, by = 'ADM1_PCODE', all.x=TRUE)
+
+ggplot(ss2, aes(fill=sabin.2)) + geom_sf() + theme_minimal() + coord_sf(datum = NA) + 
+  scale_fill_gradientn(colours = c("#a6172d","#EFDC05","#4f953b")) + #, limits = c(0.5,1)) +
+  ylab('') + xlab('') + labs(fill='Proportion Seropositve')
+
+
+
+ggplot(ss2, aes(sabin.2)) + geom_histogram(aes(color=sabin.2)) + theme_minimal() +
+  scale_color_gradientn(colours = c("#a6172d","#EFDC05","#4f953b"), limits = c(0.5,1)) 
+
+
+
+
 
 
 ## ###########################################################

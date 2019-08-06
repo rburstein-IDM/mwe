@@ -134,7 +134,7 @@ sia <- sia[fraction >= 0.5]
 # collapse by ADM_2
 sia <- sia[, .(type1_sias = sum(vaccinetype %in% c('bOPV','mOPV1','tOPV')),
                type2_sias = sum(vaccinetype %in% c('tOPV')),
-               type3_sias = sum(vaccinetype %in% c('tOPV'))),
+               type3_sias = sum(vaccinetype %in% c('bOPV','tOPV'))),
             by = .(ADM0_NAME,ADM1_NAME,ADM2_NAME)]
 
 # add adm2 id info
@@ -454,14 +454,33 @@ grid.arrange(g2,g3,nrow=2)
 
 
 ## Plot Covariate effects ladderplot
-tmp <- data.table(summary(ad_inla_mod$model_object)$fixed)
+tmp <- data.table(summary(ch_inla_mod$model_object)$fixed)
 tmp$var <- c('intercept',vars)
 
 ggplot(tmp, aes(x=var,ymin=`0.025quant`,ymax=`0.975quant`,y=mean)) +
   geom_errorbar(width = .1) + theme_minimal() + 
   geom_hline(yintercept =0,color='red') +
   geom_point() +
-  xlab('Covariate Name') + ylab('<--- (-)   Effect size   (+) --->')
+  xlab('Covariate Name') + ylab('<--- (-)   Effect size (log-odds)   (+) --->')
+
+
+# univariates
+outy <- data.table()
+for(v in paste0(tmp$var[-1])){ #},'_cs')){
+  form <- as.formula(sprintf('cbind( type2, N-type2 ) ~ %s',v))
+  m    <- summary(glm(form,data=dagg[adult==0],family='binomial'))$coefficients[2,1]
+  sd   <- summary(glm(form,data=dagg[adult==0],family='binomial'))$coefficients[2,2]
+  tmpy <- data.table(var=v,mean=exp(m),lower=exp(m-1.96*sd),upper=exp(m+1.96*sd))
+  outy <- rbind(outy,tmpy)
+}
+  
+ggplot(outy, aes(x=var,ymin=lower,ymax=upper,y=mean)) +
+  geom_errorbar(width = .1) + theme_minimal() + 
+  geom_hline(yintercept =1,color='red') +
+  geom_point() +
+  xlab('Covariate Name') + ylab('<--- (-)   Odds Ratio   (+) --->')
+
+
 
 
 ## Do rank districts
