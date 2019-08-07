@@ -9,8 +9,10 @@ library(data.table)
 library(magrittr)
 library(ggplot2)
 library(INLA)
+library(gridExtra)
+library(grid)
 
-
+set.seed(123456)
 ########################################################################################
 ## Simulate data (admin, site, pathogen cases by week)
 
@@ -25,7 +27,7 @@ n_pathogens <- 3
 # number of site types
 n_sitetypes <- 5
 
-
+# TODO, need N as well (site and admin specific population) - draw from a binomial.. 
 
 # set up param table
 params <- expand.grid(admin    = paste0('AD_',1:n_admins),
@@ -39,12 +41,20 @@ params <- expand.grid(admin    = paste0('AD_',1:n_admins),
 params[, totalcases := rbinom(.N, 1, 0.9) * rpois(.N, exp(rnorm(.N, 7, 1)))]
 
 
+# imagine an under-reporting matrix by path, admin, site. (suppress week for now). parameter is called rho_paw
+# assume these are randomly drawn for now (not likely true obvioulsy.. )
+ur <- expand.grid(admin    = paste0('AD_',1:n_admins),
+             #      pathogen = paste0('PATH_',letters[1:n_pathogens]), # The assumption is that it is equal across pathogens
+                   sitetype = paste0('SITE_',1:n_sitetypes)) %>% data.table()
+ur[, rho := rbeta(.N,2,2)]
+
+
 # Simulate overall incidence over a 20 week period for each admin area and pathogen (again independently)
 d <- data.table()
 for(r in 1:nrow(params)){
   
-  Nc <- params$totalcases[r] 
-  
+  Nc  <- params$totalcases[r] 
+    
   if(Nc != 0){
   
     # an epi curve ( just do a simple gaussian distribution, moving mean and sd a bit for each admin-pathogen combo)
@@ -62,25 +72,35 @@ for(r in 1:nrow(params)){
   } 
 }
 
-d <- d[order(admin,pathogen,week)]
+
+# now, randomly choose if each case was recorded or not
+dtrue <- merge(d, ur, by = c('admin','sitetype'), all.x = TRUE)
+dtrue[, captured := rbinom(.N,1,rho)]
+
+dobs <- dtrue[captured == 1]
+
+dtrue <- dtrue[order(admin,pathogen,week)]
+dobs  <- dobs[order(admin,pathogen,week)]
+
 
 # plot to see whats happening
-ggplot(d, aes(week,fill=sitetype)) + geom_histogram() + facet_grid(admin~pathogen)
+ggplot(dtrue, aes(week,fill=sitetype)) + geom_histogram() + facet_grid(admin~pathogen)
+ggplot(dobs, aes(week,fill=sitetype)) + geom_histogram() + facet_grid(admin~pathogen)
 
 
 # get catchment as currently defined (all pathogens by Admin, site other than the pathogen in question)
 # late can do a smooth model like mike did for this and then wont get any zeroes 
 catch <- data.table()
-for(p in unique(d$pathogen)){
-  tmp <- d[pathogen != p, .(catchment = .N+0.001), by = .(admin, sitetype)]
+for(p in unique(dobs$pathogen)){
+  tmp <- dobs[pathogen != p, .(catchment = .N+0.001), by = .(admin, sitetype)]
   tmp$pathogen <- p
   catch <- rbind(catch, tmp)
 }
-d <- merge(d, catch, by = c('admin','sitetype','pathogen'), all.x = T)
-d[is.na(catchment), catchment := 0.1] # in cases with no other pathogens present
+dobs <- merge(dobs, catch, by = c('admin','sitetype','pathogen'), all.x = T)
+dobs[is.na(catchment), catchment := 0.1] # in cases with no other pathogens present
 
 # aggregate date by week admin site pathogen for the mode
-dagg <- d[, .(cases = .N), by = .(admin,sitetype,pathogen,week,catchment)]
+dagg <- dobs[, .(cases = .N), by = .(admin,sitetype,pathogen,week,catchment)]
 
 # exapnd the aggregated data for all possible combos
 expanded <-  expand.grid(admin    = paste0('AD_',1:n_admins),
@@ -114,7 +134,7 @@ family <- 'poisson'
 outcome <- inputData$cases
 
 # initialize formula  
-formula <- as.formula('cases ~ 1 + catchment + sitetype')
+formula <- as.formula('cases ~ 1  + sitetype + catchment') # catchment
 
 # time as a latent fied
 inputData$time_row_rw2 <- inputData$week
@@ -123,65 +143,114 @@ inputData$time_row_IID <- inputData$week
 inputData$admin_row <- match(inputData$admin,unique(inputData$admin))
 inputData$time_row_admin <- inputData$week
   
-formula <- update(formula,  ~ . + f(admin_row, model='iid', hyper=hyper$local, # constr = TRUE, 
+formula <- update(formula,  ~ . + f(admin_row, model='iid', hyper=hyper$local, graph = NULL , # constr = TRUE, 
                                      group = time_row_admin, control.group=list(model="rw2")))
-formula <- update(formula,  ~ . + f(time_row_rw2, model='rw2', hyper= hyper$time) ) # +
+formula <- update(formula,  ~ . + f(time_row_rw2, model='rw2', hyper= hyper$time)) # +
                  # f(time_row_IID, model='iid', hyper=hyper$local,  constr = TRUE) )
 
-validLatentFieldColumns <- c('admin_row','time_row_admin','time_row_rw2') #,'time_row_IID')
-  
-# linear combination of pathogen and latent fields
-
-# find unique rows after discarding factors that are being averaged over
-lc.data <- data.frame(inputData[,names(inputData) %in% validLatentFieldColumns, with = FALSE])
-lc.rowIdx <- !duplicated(lc.data)
-lc.data <- lc.data[lc.rowIdx,]
-
-# generate list of desired linear combinations # https://groups.google.com/forum/#!topic/r-inla-discussion-group/_e2C2L7Wc30
-lcIdx=c()
-spentColumn<-rep(FALSE,length(validLatentFieldColumns))
-for(COLUMN in validLatentFieldColumns){
-  if(!spentColumn[validLatentFieldColumns %in% COLUMN]) {
-    lcIdx[[COLUMN]] <- inla.idx(lc.data[[COLUMN]])          
-  }
-  
-  spentColumn[validLatentFieldColumns %in% COLUMN]<-TRUE
-}
-
-# generate list of desired linear combinations # https://groups.google.com/forum/#!topic/r-inla-discussion-group/_e2C2L7Wc30
-lc.latentField <- vector("list", nrow(lc.data))
-
-w<-vector("list", length(names(lcIdx))+1)
-w[[length(names(lcIdx))+1]]<-1 #pathogen
-
-for(k in 1:nrow(lc.data)){
-  
-  for(n in 1:length(names(lcIdx))){
-    w[[n]]<-rep(0,nrow(lc.data))
-    w[[n]][lcIdx[[n]][k]]<-1
-  }
-  names(w) <- c(names(lcIdx),'(Intercept)')
-  
-  lc <- inla.make.lincomb(w)
-  names(lc)<- paste0('latent_field',k)
-  lc.latentField[k]<-lc
-  lc.data$latentField[k]<-names(lc)
-
-}
-
-
-# get original values for linear combination categories
-lc.colIdx <- (names(inputData) %in% c('admin','week'))
-lc.data <-inputData[which(lc.rowIdx),c('admin','week'),with=FALSE]
 
 #fit
 model <- INLA::inla(formula           = formula,
                     family            = family, 
                     data              = inputData, 
-                    lincomb           = lc.latentField,
+                   # lincomb           = lc.latentField,
                    # Ntrials           = inputData$cases,
                     control.predictor = list(compute=TRUE,link=1),
                     control.compute   = list(config=TRUE,dic=TRUE),
                     verbose           = TRUE,
                     control.inla      = list(int.strategy="auto", strategy = "gaussian"))
+
+# lincomb not working right now, but can just grab means from summary.random
+# admin_row will be n_admin time n_weeks long. time_row_rw2 will be n_weeks long
+out <- data.table(intensity = model$summary.random$admin_row$mean + rep(model$summary.random$time_row_rw2$mean, each=n_admins),
+                  admin     = rep( paste0('AD_',1:n_admins), max(dagg$week)),
+                  week      = rep(1:max(dagg$week), each=n_admins))
+out <- merge(out,  dobs[pathogen == path_to_model, .(observed_cases = .N), by = .(admin, week)], by = c('admin','week'), all.x = TRUE)
+out <- merge(out, dtrue[pathogen == path_to_model, .(true_cases     = .N, rho = mean(rho)), by = .(admin, week)], by = c('admin','week'), all.x = TRUE)
+out[is.na(observed_cases), observed_cases := 0]
+out[is.na(true_cases),     true_cases := 0]
+# do the other fixed effects variables equal rho*N?
+
+
+
+plot(out$true_cases,out$cases_observed); lines(out$true_cases,out$true_cases,col='red')
+
+
+# can
+plot(log(out$true_cases),out$intensity)
+
+
+
+# plot smoothed time series
+g1=ggplot(out, aes(y=exp(intensity), x=week, color=admin, group=admin)) + geom_line() + theme_bw()
+g2=ggplot(out, aes(y=true_cases, x=week, color=admin, group=admin)) + geom_line() + theme_bw()
+g3=ggplot(out, aes(y=observed_cases, x=week, color=admin, group=admin)) + geom_line() + theme_bw()
+g4=ggplot(out, aes(x=log(true_cases), y=intensity, color=rho)) + geom_point() + theme_bw()
+grid.arrange(g1,g2,g3,g4, nrow=2)
+
+# weird it seems to work better when rho varies by pathogen as well?
+
+
+# explore other model compopnents, formalize whats happening.. 
+
+
+summary(model)
+
+
+
+# old lincomb stuff
+if(TRUE==FALSE){
+  validLatentFieldColumns <- c('admin_row','time_row_admin','time_row_rw2') #,'time_row_IID')
+  
+  # linear combination of pathogen and latent fields
+  
+  # find unique rows after discarding factors that are being averaged over
+  lc.data <- data.frame(inputData[,names(inputData) %in% validLatentFieldColumns, with = FALSE])
+  lc.rowIdx <- !duplicated(lc.data)
+  lc.data <- lc.data[lc.rowIdx,]
+  
+  # generate list of desired linear combinations # https://groups.google.com/forum/#!topic/r-inla-discussion-group/_e2C2L7Wc30
+  lcIdx=c()
+  spentColumn<-rep(FALSE,length(validLatentFieldColumns))
+  for(COLUMN in validLatentFieldColumns){
+    if(!spentColumn[validLatentFieldColumns %in% COLUMN]) {
+      lcIdx[[COLUMN]] <- inla.idx(lc.data[[COLUMN]])          
+    }
+    
+    spentColumn[validLatentFieldColumns %in% COLUMN]<-TRUE
+  }
+  
+  
+  # generate list of desired linear combinations # https://groups.google.com/forum/#!topic/r-inla-discussion-group/_e2C2L7Wc30
+  lc.latentField <- vector("list", nrow(lc.data))
+  
+  w<-vector("list", length(names(lcIdx))+1)
+  w[[length(names(lcIdx))+1]]<-1 #pathogen
+  
+  for(k in 1:nrow(lc.data)){
+    
+    for(n in 1:length(names(lcIdx))){
+      w[[n]]<-rep(0,nrow(lc.data))
+      w[[n]][lcIdx[[n]][k]]<-1
+    }
+    names(w) <- c(names(lcIdx),'(Intercept)')
+    
+    lc <- inla.make.lincomb(w)
+    names(lc)<- paste0('latent_field',k)
+    lc.latentField[k]<-lc
+    lc.data$latentField[k]<-names(lc)
+    
+  }
+  
+  #lc.latentField <- inla.make.lincombs(lc.data)
+  
+  #lc.latentField <- inla.make.lincombs(time_row_rw2 = diag(lc.data$time_row_rw2), 
+  #                          admin_row = diag(lc.data$admin_row), 
+  #                         time_row_admin = diag(lc.data$time_row_admin))
+  
+  # get original values for linear combination categories
+  lc.colIdx <- (names(inputData) %in% c('admin','week'))
+  lc.data <-inputData[which(lc.rowIdx),c('admin','week'),with=FALSE]
+  
+}
 
