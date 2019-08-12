@@ -19,13 +19,13 @@ set.seed(123456)
 ### set params
 
 # number of admin areas
-n_admins <- 5
+n_admins <- 10
 
 # number of pathogens tracked
-n_pathogens <- 3
+n_pathogens <- 13
 
 # number of site types
-n_sitetypes <- 5
+n_sitetypes <- 6
 
 # TODO, need N as well (site and admin specific population) - draw from a binomial.. 
 
@@ -44,7 +44,7 @@ params[, totalcases := rbinom(.N, 1, 0.9) * rpois(.N, exp(rnorm(.N, 7, 1)))]
 # imagine an under-reporting matrix by path, admin, site. (suppress week for now). parameter is called rho_paw
 # assume these are randomly drawn for now (not likely true obvioulsy.. )
 ur <- expand.grid(admin    = paste0('AD_',1:n_admins),
-             #      pathogen = paste0('PATH_',letters[1:n_pathogens]), # The assumption is that it is equal across pathogens
+              #     pathogen = paste0('PATH_',letters[1:n_pathogens]), # The assumption is that it is equal across pathogens
                    sitetype = paste0('SITE_',1:n_sitetypes)) %>% data.table()
 ur[, rho := rbeta(.N,2,2)]
 
@@ -58,9 +58,10 @@ for(r in 1:nrow(params)){
   if(Nc != 0){
   
     # an epi curve ( just do a simple gaussian distribution, moving mean and sd a bit for each admin-pathogen combo)
-    peak <- abs(round(rnorm(1, 10, 3)))
+    peak <- abs(round(rnorm(1, 14, 3)))
     stdv <- abs(round(rnorm(1, 4,  1)))
     week <- ceiling(abs(round(rnorm(Nc, mean = peak, sd = stdv))))
+  #  true_intensity <- data.table(true_intensity=dnorm(1:max(week),peak,stdv),week=1:max(week))
     
     # for each case, draw a sitetype it was detected at (for now assume equal probability detection at each site)
     # this is pretty unrealistic in the real data so we'll need to think aboiut the effect of this assumption (what is most cases are from one site one admin (ie UW))
@@ -68,6 +69,7 @@ for(r in 1:nrow(params)){
     
     # append to d
     out <- data.table(admin = params$admin[r], pathogen = params$pathogen[r], week= week, sitetype = styp)
+   # out <- merge(out, true_intensity, by = 'week', all.x=T)
     d   <- rbind(d, out)
   } 
 }
@@ -84,7 +86,7 @@ dobs  <- dobs[order(admin,pathogen,week)]
 
 
 # plot to see whats happening
-ggplot(dtrue, aes(week,fill=sitetype)) + geom_histogram() + facet_grid(admin~pathogen)
+#ggplot(dtrue, aes(week,fill=sitetype)) + geom_histogram() + facet_grid(admin~pathogen)
 ggplot(dobs, aes(week,fill=sitetype)) + geom_histogram() + facet_grid(admin~pathogen)
 
 
@@ -108,26 +110,30 @@ expanded <-  expand.grid(admin    = paste0('AD_',1:n_admins),
                          sitetype = paste0('SITE_',1:n_sitetypes),
                          week     = 1:max(d$week)) %>% data.table()
 dagg <- merge(expanded, dagg, by = c('admin', 'pathogen', 'sitetype', 'week'), all.x = TRUE)
+
 dagg[is.na(catchment) , catchment := 0.1]
 dagg[is.na(cases),     cases := 0]
 
 dagg[, catchment := log(catchment)-mean(log(catchment))]
 
+# MERGE CATCHMENT ERROR TODO LOOK INTO IT
+
+
 ########################################################################################
 ## Run model, try to do similar to mike's iid model as possible
 
 ## model one pathogen at a time.
-path_to_model <- 'PATH_c'
+path_to_model <- 'PATH_a'
 
 # subset
 inputData <- dagg[pathogen == path_to_model]
 
 # priors
 hyper <- list()
-hyper$global <- list(prec = list( prior = "pc.prec", param = 1/10, alpha = 0.01))
-hyper$local  <- list(prec = list( prior = "pc.prec", param = 1/200, alpha = 0.01))
+hyper$global <- list(prec = list( prior = "pc.prec", param = 100, alpha = 0.01))
+hyper$local  <- list(prec = list( prior = "pc.prec", param = 1/100, alpha = 0.01))
 hyper$age    <- list(prec = list( prior = "pc.prec", param = 1, alpha = 0.01))
-hyper$time   <- list(prec = list( prior = "pc.prec", param = 1/50, alpha = 0.01))
+hyper$time   <- list(prec = list( prior = "pc.prec", param = 1/100, alpha = 0.01))
 
 family <- 'poisson'
 
@@ -158,7 +164,7 @@ model <- INLA::inla(formula           = formula,
                     control.predictor = list(compute=TRUE,link=1),
                     control.compute   = list(config=TRUE,dic=TRUE),
                     verbose           = TRUE,
-                    control.inla      = list(int.strategy="auto", strategy = "gaussian"))
+                    control.inla      = list(int.strategy="auto", strategy = "gaussian", cmin=0))
 
 # lincomb not working right now, but can just grab means from summary.random
 # admin_row will be n_admin time n_weeks long. time_row_rw2 will be n_weeks long
@@ -167,31 +173,41 @@ out <- data.table(intensity = model$summary.random$admin_row$mean + rep(model$su
                   week      = rep(1:max(dagg$week), each=n_admins))
 out <- merge(out,  dobs[pathogen == path_to_model, .(observed_cases = .N), by = .(admin, week)], by = c('admin','week'), all.x = TRUE)
 out <- merge(out, dtrue[pathogen == path_to_model, .(true_cases     = .N, rho = mean(rho)), by = .(admin, week)], by = c('admin','week'), all.x = TRUE)
+
 out[is.na(observed_cases), observed_cases := 0]
 out[is.na(true_cases),     true_cases := 0]
 # do the other fixed effects variables equal rho*N?
 
+# rank admins at each time point?
+rank <- copy(out)[order(week,intensity)]
+rank[, intensity_rank := 1:.N, by = week]
+rank <- rank[order(week,observed_cases)]
+rank[, observed_cases_rank := 1:.N, by = week]
+rank <- rank[order(week,true_cases)]
+rank[, true_cases_rank := 1:.N, by = week]
 
-
-plot(out$true_cases,out$cases_observed); lines(out$true_cases,out$true_cases,col='red')
-
-
-# can
-plot(log(out$true_cases),out$intensity)
 
 
 
 # plot smoothed time series
-g1=ggplot(out, aes(y=exp(intensity), x=week, color=admin, group=admin)) + geom_line() + theme_bw()
-g2=ggplot(out, aes(y=true_cases, x=week, color=admin, group=admin)) + geom_line() + theme_bw()
-g3=ggplot(out, aes(y=observed_cases, x=week, color=admin, group=admin)) + geom_line() + theme_bw()
-g4=ggplot(out, aes(x=log(true_cases), y=intensity, color=rho)) + geom_point() + theme_bw()
-grid.arrange(g1,g2,g3,g4, nrow=2)
+g1=ggplot(out, aes(y=exp(intensity), x=week, color=admin, group=admin)) + geom_line() + theme_bw() + theme(legend.position = 'none')
+g2=ggplot(out, aes(y=true_cases, x=week, color=admin, group=admin)) + geom_line() + theme_bw() + theme(legend.position = 'none')
+g3=ggplot(out, aes(y=observed_cases, x=week, color=admin, group=admin)) + geom_line() + theme_bw() + theme(legend.position = 'none')
+g4=ggplot(out, aes(x=log(true_cases), y=intensity, color=admin)) + geom_point() + theme_bw() + theme(legend.position = 'none')
+g5 = ggplot(rank[week < 25], aes(week,intensity_rank,group=admin,color=admin),alpha=.4) + 
+  geom_line() + theme_bw() + # admin %in% paste0('AD_',1:5) & 
+  theme(legend.position = 'none') + ylab('ADMIN RANK') +
+  geom_line(aes(week,true_cases_rank+.1,group=admin,color=admin), lty = 'dashed')
+grid.arrange(g1,g2,g3,g4,g5, layout_matrix = rbind(c(1,2),c(3,4),c(5,5)))
 
 # weird it seems to work better when rho varies by pathogen as well?
 
 
+
 # explore other model compopnents, formalize whats happening.. 
+
+# how does it scale with more pathogens? 
+# how robust is it to changing under-reporting patterns?
 
 
 summary(model)
