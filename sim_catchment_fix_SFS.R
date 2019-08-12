@@ -19,13 +19,13 @@ set.seed(123456)
 ### set params
 
 # number of admin areas
-n_admins <- 10
+n_admins <- 6
 
 # number of pathogens tracked
-n_pathogens <- 13
+n_pathogens <- 10
 
 # number of site types
-n_sitetypes <- 6
+n_sitetypes <- 5
 
 # TODO, need N as well (site and admin specific population) - draw from a binomial.. 
 
@@ -98,11 +98,11 @@ for(p in unique(dobs$pathogen)){
   tmp$pathogen <- p
   catch <- rbind(catch, tmp)
 }
-dobs <- merge(dobs, catch, by = c('admin','sitetype','pathogen'), all.x = T)
-dobs[is.na(catchment), catchment := 0.1] # in cases with no other pathogens present
+#dobs <- merge(dobs, catch, by = c('admin','sitetype','pathogen'), all.x = T)
+#dobs[is.na(catchment), catchment := 0.1] # in cases with no other pathogens present
 
 # aggregate date by week admin site pathogen for the mode
-dagg <- dobs[, .(cases = .N), by = .(admin,sitetype,pathogen,week,catchment)]
+dagg <- dobs[, .(cases = .N), by = .(admin,sitetype,pathogen,week)]
 
 # exapnd the aggregated data for all possible combos
 expanded <-  expand.grid(admin    = paste0('AD_',1:n_admins),
@@ -111,8 +111,11 @@ expanded <-  expand.grid(admin    = paste0('AD_',1:n_admins),
                          week     = 1:max(d$week)) %>% data.table()
 dagg <- merge(expanded, dagg, by = c('admin', 'pathogen', 'sitetype', 'week'), all.x = TRUE)
 
-dagg[is.na(catchment) , catchment := 0.1]
-dagg[is.na(cases),     cases := 0]
+dagg <- merge(dagg, catch, by = c('admin','sitetype','pathogen'), all.x = T)
+
+
+#dagg[is.na(catchment) , catchment := 0.1]
+#dagg[is.na(cases),     cases := 0]
 
 dagg[, catchment := log(catchment)-mean(log(catchment))]
 
@@ -149,11 +152,11 @@ inputData$time_row_IID <- inputData$week
 inputData$admin_row <- match(inputData$admin,unique(inputData$admin))
 inputData$time_row_admin <- inputData$week
   
-formula <- update(formula,  ~ . + f(admin_row, model='iid', hyper=hyper$local, graph = NULL , # constr = TRUE, 
+formula <- update(formula,  ~ . + f(admin_row, model='iid',  graph = NULL , # constr = TRUE,  hyper=hyper$local,
                                      group = time_row_admin, control.group=list(model="rw2")))
-formula <- update(formula,  ~ . + f(time_row_rw2, model='rw2', hyper= hyper$time)) # +
+formula <- update(formula,  ~ . + f(time_row_rw2, model='rw2')) # +, hyper= hyper$time
                  # f(time_row_IID, model='iid', hyper=hyper$local,  constr = TRUE) )
-
+# Need a closer look at priors here, the defaults are doing much better
 
 #fit
 model <- INLA::inla(formula           = formula,
