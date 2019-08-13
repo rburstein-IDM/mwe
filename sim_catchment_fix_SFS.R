@@ -12,14 +12,14 @@ library(INLA)
 library(gridExtra)
 library(grid)
 
-set.seed(123456)
+set.seed(123457)
 ########################################################################################
 ## Simulate data (admin, site, pathogen cases by week)
 
 ### set params
 
 # number of admin areas
-n_admins <- 6
+n_admins <- 5
 
 # number of pathogens tracked
 n_pathogens <- 10
@@ -38,7 +38,7 @@ params <- expand.grid(admin    = paste0('AD_',1:n_admins),
 # for now, we assume cases are independent (the current method of using total other pathogens depends on this assumption, I think)
 # later we can change this
 # make them zero inflated but if have cases some random number of cases
-params[, totalcases := rbinom(.N, 1, 0.9) * rpois(.N, exp(rnorm(.N, 7, 1)))]
+params[, totalcases := rbinom(.N, 1, 0.9) * rpois(.N, exp(rnorm(.N, 5, 1)))]
 
 
 # imagine an under-reporting matrix by path, admin, site. (suppress week for now). parameter is called rho_paw
@@ -46,7 +46,8 @@ params[, totalcases := rbinom(.N, 1, 0.9) * rpois(.N, exp(rnorm(.N, 7, 1)))]
 ur <- expand.grid(admin    = paste0('AD_',1:n_admins),
               #     pathogen = paste0('PATH_',letters[1:n_pathogens]), # The assumption is that it is equal across pathogens
                    sitetype = paste0('SITE_',1:n_sitetypes)) %>% data.table()
-ur[, rho := rbeta(.N,2,2)]
+#ur[, rho := rbeta(.N,2,2)]
+ur[, rho := ((rbinom(.N,1,.5)*rbeta(.N,5,1)+rbinom(.N,1,.5)*rbeta(.N,5,1))/2)]
 
 
 # Simulate overall incidence over a 20 week period for each admin area and pathogen (again independently)
@@ -65,8 +66,8 @@ for(r in 1:nrow(params)){
     
     # for each case, draw a sitetype it was detected at (for now assume equal probability detection at each site)
     # this is pretty unrealistic in the real data so we'll need to think aboiut the effect of this assumption (what is most cases are from one site one admin (ie UW))
-    styp <- paste0('SITE_',ceiling(runif(Nc,0,n_sitetypes)))
-    
+    #styp <- paste0('SITE_',ceiling(runif(Nc,0,n_sitetypes)))
+    styp <- paste0('SITE_',ceiling(((rbinom(Nc,1,.5)*rbeta(Nc,5,1)+rbinom(Nc,1,.5)*rbeta(Nc,5,1))/2)*n_sitetypes+.001))
     # append to d
     out <- data.table(admin = params$admin[r], pathogen = params$pathogen[r], week= week, sitetype = styp)
    # out <- merge(out, true_intensity, by = 'week', all.x=T)
@@ -87,17 +88,34 @@ dobs  <- dobs[order(admin,pathogen,week)]
 
 # plot to see whats happening
 #ggplot(dtrue, aes(week,fill=sitetype)) + geom_histogram() + facet_grid(admin~pathogen)
-ggplot(dobs, aes(week,fill=sitetype)) + geom_histogram() + facet_grid(admin~pathogen)
+ggplot(dobs, aes(week,fill=pathogen)) + geom_histogram() + facet_grid(admin~sitetype)
 
 
 # get catchment as currently defined (all pathogens by Admin, site other than the pathogen in question)
 # late can do a smooth model like mike did for this and then wont get any zeroes 
 catch <- data.table()
 for(p in unique(dobs$pathogen)){
-  tmp <- dobs[pathogen != p, .(catchment = .N+0.001), by = .(admin, sitetype)]
-  tmp$pathogen <- p
-  catch <- rbind(catch, tmp)
+  tmp <- dobs[pathogen != p]
+  if(nrow(tmp)>0){
+    tmp <- tmp[, .(catchment = .N), by = .(admin, sitetype)]
+    tmp$pathogen <- p
+    catch <- rbind(catch, tmp)
+  } 
 }
+
+# expand out and fill in zeroes
+# This could lead to problems, since avg over S/A could miss a whole outbreak if its in one S/A?
+expp <-  expand.grid(admin    = paste0('AD_',1:n_admins),
+                     pathogen = paste0('PATH_',letters[1:n_pathogens]),
+                     sitetype = paste0('SITE_',1:n_sitetypes)) %>% data.table()
+catch <- merge(expp, catch, by = c('admin','pathogen','sitetype'), all.x=T)
+m <- inla(formula = catchment ~ f(sitetype, model = 'iid') + f(admin, model = 'iid'), 
+          data = catch, family = 'poisson',control.predictor = list(compute=TRUE,link=1))
+#catch$catchment <- exp(m$summary.linear.predictor$mean)
+catch[, is.na(catchment) := 0.1]
+
+# get actual catchment/propensity as well
+
 #dobs <- merge(dobs, catch, by = c('admin','sitetype','pathogen'), all.x = T)
 #dobs[is.na(catchment), catchment := 0.1] # in cases with no other pathogens present
 
@@ -115,7 +133,7 @@ dagg <- merge(dagg, catch, by = c('admin','sitetype','pathogen'), all.x = T)
 
 
 #dagg[is.na(catchment) , catchment := 0.1]
-#dagg[is.na(cases),     cases := 0]
+dagg[is.na(cases),     cases := 0]
 
 dagg[, catchment := log(catchment)-mean(log(catchment))]
 
@@ -197,11 +215,13 @@ g1=ggplot(out, aes(y=exp(intensity), x=week, color=admin, group=admin)) + geom_l
 g2=ggplot(out, aes(y=true_cases, x=week, color=admin, group=admin)) + geom_line() + theme_bw() + theme(legend.position = 'none')
 g3=ggplot(out, aes(y=observed_cases, x=week, color=admin, group=admin)) + geom_line() + theme_bw() + theme(legend.position = 'none')
 g4=ggplot(out, aes(x=log(true_cases), y=intensity, color=admin)) + geom_point() + theme_bw() + theme(legend.position = 'none')
-g5 = ggplot(rank[week < 25], aes(week,intensity_rank,group=admin,color=admin),alpha=.4) + 
+g5=ggplot(out, aes(x=log(observed_cases), y=intensity, color=admin)) + geom_point() + theme_bw() + theme(legend.position = 'none')
+
+g6 = ggplot(rank[week < 25], aes(week,intensity_rank,group=admin,color=admin),alpha=.4) + 
   geom_line() + theme_bw() + # admin %in% paste0('AD_',1:5) & 
   theme(legend.position = 'none') + ylab('ADMIN RANK') +
   geom_line(aes(week,true_cases_rank+.1,group=admin,color=admin), lty = 'dashed')
-grid.arrange(g1,g2,g3,g4,g5, layout_matrix = rbind(c(1,2),c(3,4),c(5,5)))
+grid.arrange(g1,g6,g2,g3,g4,g5, layout_matrix = rbind(c(1,2),c(3,4),c(5,6)))
 
 # weird it seems to work better when rho varies by pathogen as well?
 
