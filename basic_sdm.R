@@ -169,7 +169,7 @@ auxs   <- c(rR        = 0.3,
             rQ        = 0.3, 
             rV        = 0.1, 
             Qdelay    = 3,
-            Vdelay    = 1,
+            Vdelay    = 0,
             P4Pfactor = 0,
             G_0       = 0,
             M_0       = 0)
@@ -181,33 +181,34 @@ L <- function(x) { (1-exp(-2*x))/(1+exp(-2*x))  }
 model4 <- function(time, stocks, auxs){
   with(as.list(c(stocks, auxs)),{
    
+    # delay variables
     if (time >= Qdelay)
-      Qdelay <- lagvalue(time - Qdelay, 2)
+      Qlag <- lagvalue(time - Qdelay, 2)
     else
-      Qdelay <- lagvalue(1,2)
+      Qlag <- lagvalue(1,2)
     
     if (time >= Vdelay)
-      Vdelay <- lagvalue(time - Vdelay, 3)
+      Vlag <- lagvalue(time - Vdelay, 3)
     else
-      Vdelay <- lagvalue(1,2)
+      Vlag <- lagvalue(1,2)
     
     # dependent variables
-    P4P <- P4Pfactor * L(Vdelay) # add delay here
+    P4P <- P4Pfactor * ifelse(L(Vlag)<0,0,L(Vlag)) # add delay here
     G   <- G_0 + 1.1^P4P - 1
     M   <- M_0 + P4P - G
 
     # differential equations
-    dR_dt <- rR*L(V) - rRQ*R*1.3^M + P4P
+    dR_dt <- rR*L(V) - rRQ*R*(1.3^M) + P4P
     
     if(V>0)
-      dQ_dt <- rRQ*R*1.3^M - rQ*L(V)*(1.1^G)/(1.3^M)
+      dQ_dt <- rRQ*R*(1.3^M) - rQ*L(V)*(1.1^G)/(1.3^M)
     else 
-      dQ_dt <- rRQ*R*1.3^M - rQ*L(V)*(1.3^G)/(1.1^M)
+      dQ_dt <- rRQ*R*(1.3^M) - rQ*L(V)*(1.3^M)/(1.1^G)
     
-    if(Qdelay>0)
-      dV_dt <- rV*L(Qdelay)*1.3^M
+    if(Qlag>0)
+      dV_dt <- rV*L(Qlag)*(1.3^M)
     else 
-      dV_dt <- rV*L(Qdelay)/1.3^M
+      dV_dt <- rV*L(Qlag)/(1.3^M)
     
     # All the results for the time step
     ans <- list(c(dR_dt,dQ_dt,dV_dt))
@@ -217,7 +218,37 @@ model4 <- function(time, stocks, auxs){
 o4 <- data.frame(dede(y=stocks, times=simtime, func = model4,  parms=auxs))
 o4 <- data.table(melt(o4, id = 'time'))
 
-ggplot(o4[variable!='R'], aes(x=time,y=value,color=variable)) + geom_line(lwd=2) +
+ggplot(o4[variable!='R'], aes(x=time,y=L(value),color=variable)) + geom_line(lwd=2) +
   ylim(-1,1) + xlim(0,100) + theme_bw() + 
   scale_color_manual(values=c("#3465eb", "#eb6134"), labels = c('Quality', "Volume"))
+
+
+
+# replicate figure 5 in alonge et al paper by changing the aux variables:
+aux_a <- auxs # baseline
+aux_b <- auxs # P4P
+  aux_b$P4Pfactor <- 0.2
+aux_c <- aux_b # P4P with motivation
+  aux_c$M_0 <- 0.3
+aux_d <- aux_b # high gaming P4P
+  aux_d$G_0 <- 0.8
+
+o_a <- melt(data.table(dede(y=stocks, times=simtime, func = model4,  parms=aux_a)), id='time')
+o_b <- melt(data.table(dede(y=stocks, times=simtime, func = model4,  parms=aux_b)), id='time')
+o_c <- melt(data.table(dede(y=stocks, times=simtime, func = model4,  parms=aux_c)), id='time')
+o_d <- melt(data.table(dede(y=stocks, times=simtime, func = model4,  parms=aux_d)), id='time')
+
+o <- do.call('rbind', list(o_a, o_b, o_c, o_d))
+o$label <- rep(c('a','b','c','d'), each = dim(o)/4)
+ggplot(o[variable!='R'], aes(x=time,y=L(value),color=variable)) + geom_line(lwd=1.2) +
+  ylim(-1,1) + xlim(0,100) + theme_bw() + geom_hline(yintercept = 0, lty = 'dotted') +
+  scale_color_manual(values=c("#3465eb", "#eb6134"), labels = c('Quality', "Volume")) +
+  facet_wrap(~label)
+
+
+
+# do my own sensitivty analysis to see how much depends on certain assumptions
+
+
+
 
